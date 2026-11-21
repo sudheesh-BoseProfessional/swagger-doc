@@ -1,0 +1,216 @@
+openapi: 3.0.3
+info:
+  title: Fusion Key API — Phase 1
+  version: 1.0.0
+servers:
+  - url: https://api.dev.example.com
+    description: dev
+  - url: https://api.qa.example.com
+    description: QA
+  - url: https://api.preprod.example.com
+    description: pre-prod
+  - url: https://api.example.com
+    description: prod
+tags:
+  - name: Keys
+    description: Shared data key for project file encryption (Phase 1)
+security:
+  - bearerAuth: []
+paths:
+  /keys/data-key:
+    get:
+      tags: [Keys]
+      operationId: getDataKey
+      summary: Get the shared data key (active or a specific version)
+      description: |
+        Without `version`, returns the active shared data key for this environment.
+        With `version`, returns that key version so the app can open files encrypted
+        with it.
+      parameters:
+        - name: version
+          in: query
+          required: false
+          description: Key version from a file header. Omit to get the active version.
+          schema:
+            type: integer
+            format: int32
+            minimum: 1
+          example: 3
+      responses:
+        '200':
+          description: Key returned.
+          headers:
+            X-Key-Active-Version:
+              $ref: '#/components/headers/XKeyActiveVersion'
+            X-Key-Blocked-Versions:
+              $ref: '#/components/headers/XKeyBlockedVersions'
+            Cache-Control:
+              $ref: '#/components/headers/CacheControlNoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataKeyResponse'
+              examples:
+                active:
+                  summary: Active key (no version parameter)
+                  value:
+                    plaintextKey: q3F9b2Vh0mZ1kL7pQe4sT8uVx2yA6cD0fG3hJ5kL8nO=
+                    encryptedKey: AQIDAHh...base64...==
+                    keyVersion: 4
+                    activeVersion: 4
+                older:
+                  summary: Older version requested with ?version=3
+                  value:
+                    plaintextKey: Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MGFiY2RlZmdoaWo=
+                    encryptedKey: AQIDAHh...base64...==
+                    keyVersion: 3
+                    activeVersion: 4
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '410':
+          $ref: '#/components/responses/Gone'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  headers:
+    XKeyActiveVersion:
+      description: Current active shared key version. Sent on every fusion-api response.
+      schema:
+        type: integer
+        format: int32
+      example: 4
+    XKeyBlockedVersions:
+      description: |
+        Comma-separated key versions the app must not use to encrypt (compromised).
+        Empty when none. Sent on every fusion-api response.
+      schema:
+        type: string
+      example: '3'
+    CacheControlNoStore:
+      description: Key responses must not be cached by any intermediary.
+      schema:
+        type: string
+        enum: [no-store]
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+      example: 5
+  schemas:
+    DataKeyResponse:
+      type: object
+      required: [plaintextKey, encryptedKey, keyVersion, activeVersion]
+      properties:
+        plaintextKey:
+          type: string
+          format: byte
+          description: |
+            Base64 of the 32-byte AES-256 data key. Store only in OS secure storage
+            (Keychain, DPAPI, Keystore); never log or write to disk in plain form.
+            Must decode to exactly 32 bytes.
+          minLength: 44
+          maxLength: 44
+        encryptedKey:
+          type: string
+          format: byte
+          description: |
+            Base64 of the KMS CiphertextBlob (the same key wrapped by the environment's
+            KMS key), typically about 184 bytes. Written into every file header as a
+            recovery copy; do not assume a fixed length.
+        keyVersion:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Version of the key in this response. Written into the file header.
+        activeVersion:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Current active version. Use this version to encrypt new saves.
+    Error:
+      type: object
+      required: [error_message]
+      properties:
+        error_message:
+          type: string
+  responses:
+    BadRequest:
+      description: The `version` parameter is malformed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_message: version must be a positive integer
+    Unauthorized:
+      description: Missing, expired or invalid auth token. The app wipes cached keys.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_message: invalid or expired token
+    Forbidden:
+      description: |
+        The caller does not belong to a valid organisation, or KMS rejected the request
+        (key or encryption context mismatch). The app wipes cached keys.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_message: access to the data key is not allowed
+    NotFound:
+      description: The requested key version does not exist.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_message: key version 9 does not exist
+    Gone:
+      description: |
+        The requested key version was destroyed after migration and can no longer be
+        served. Files still under it can only be recovered from backups made before
+        destruction.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_message: key version 2 has been destroyed
+    TooManyRequests:
+      description: Per-user rate limit exceeded.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_message: too many key requests
+    ServiceUnavailable:
+      description: AWS KMS unavailable or throttled. Retry with exponential backoff.
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error_message: key service temporarily unavailable
